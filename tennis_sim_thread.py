@@ -1,4 +1,3 @@
-
 """
 __author__ = "Aditya Gadgil"
 Python version = 3.9
@@ -12,8 +11,11 @@ threads to actually play the game.) """
 
 import collections
 import random
+import sys
 import threading
 import time
+import pytest
+import logging as log
 
 # Minimum winning score
 MIN_WINNING_SCORE = 11
@@ -35,6 +37,17 @@ MATCH_END = "match_end"
 
 # Decision TEN_TIE
 TEN_TIE = "ten_tie"
+
+# The global winner (for test)
+set_winner = ""
+
+# The global last_serving (for test)
+last_serving = ""
+
+# Logging config
+log.basicConfig()
+log.root.setLevel(log.INFO)
+log.basicConfig(level=log.INFO)
 
 
 def serve():
@@ -73,23 +86,26 @@ def simulate_set(match_decisions, score_card):
     """
     tied_at_ten = match_decisions[TEN_TIE]
     match_ended = match_decisions[MATCH_END]
-
+    global set_winner
+    global last_serving
     if not match_ended:  # Because the second thread which waits for the event won't know if match ended or not
-        print("serving: " + threading.current_thread().name.__str__())
+        current_serving = str(threading.current_thread().name)
+        log.info("serving: " + current_serving)
         # Condition 1: Minimum score attainment win
         if not tied_at_ten:
             for i in range(2):
                 winner = serve()
                 score_card[winner] += 1
                 winning_score = max(score_card[PLAYER_1], score_card[PLAYER_2])
-                print("Point won by " + winner + " with score " + str(score_card[winner]))
+                log.info("Point won by " + winner + " with score " + str(score_card[winner]))
                 if score_card[PLAYER_1] == 10 and score_card[PLAYER_2] == 10:
                     match_decisions[TEN_TIE] = True  # Sets the ten_tie to true
-                    print("Tie at 10-10.")
+                    log.info("Tie at 10-10.")
                     break  # Break here because we'll need to take different route of game in a ten-tie
                 if winning_score >= MIN_WINNING_SCORE:
-                    print("Set over. Winner is " + get_player_from_score(score=winning_score,
-                                                                         score_card=score_card) + " with " + str(
+                    set_winner = winner
+                    last_serving = current_serving
+                    log.info("Set over. Winner is " + set_winner + " with " + str(
                         winning_score) + " points")
                     match_decisions[MATCH_END] = True
                     break
@@ -102,21 +118,24 @@ def simulate_set(match_decisions, score_card):
                 winner = serve()
                 score_card[winner] += 1
                 winning_score = max(score_card[PLAYER_1], score_card[PLAYER_2])
-                print("Point won by " + winner + " with score " + str(score_card[winner]))
+                log.info("Point won by " + winner + " with score " + str(score_card[winner]))
                 if abs(score_card[PLAYER_1] - score_card[PLAYER_2]) == 2:
-                    print("Set over after tie at 10-10. Winner is {0} with score {1} ".format(
-                        get_player_from_score(score=winning_score,
-                                              score_card=score_card),
+                    set_winner = winner
+                    last_serving = current_serving
+                    log.info("Set over after tie at 10-10. Winner is {0} with score {1} ".format(
+                        set_winner,
                         winning_score))
                     match_decisions[MATCH_END] = True
                     match_decisions[TEN_TIE] = False
                     break
                 if score_card[winner] >= 21:
-                    print("Set won after attaining 21 points by {0} ".format(get_player_from_score(
-                        score=winning_score, score_card=score_card)))
+                    set_winner = winner
+                    last_serving = current_serving
+                    log.info("Set won after attaining 21 points by {0} ".format(set_winner))
                     match_decisions[MATCH_END] = True
                     break
         return winner
+    return
 
 
 def player_1(event, match_decisions, score_card):
@@ -131,14 +150,17 @@ def player_1(event, match_decisions, score_card):
     :param match_decisions:
     :param score_card:
     """
-    while not match_decisions[MATCH_END]:
+    while True:
         winner = simulate_set(match_decisions=match_decisions, score_card=score_card)
         if match_decisions[MATCH_END]:
+            # Setting this event here to free player_2 thread from waiting
+            event.set()
             break
         if winner is PLAYER_2:
-            print("next serving: " + PLAYER_2)
             event.set()
+            # This sleep is important for player_2 to get a lock on game
             time.sleep(2)
+    return
 
 
 def player_2(event, match_decisions, score_card):
@@ -152,15 +174,37 @@ def player_2(event, match_decisions, score_card):
     :param match_decisions:
     :param score_card:
     """
-    while not match_decisions[MATCH_END]:
+    while True:
         event.wait()
         winner = simulate_set(match_decisions=match_decisions, score_card=score_card)
+        if match_decisions[MATCH_END]:
+            # if event.is_set():
+            #     event.clear()
+            break
         if winner is PLAYER_1:
-            print("next serving: " + PLAYER_1)
             event.clear()
-            time.sleep(2)
+            # time.sleep(2)
         else:
+            # Setting this event here to continue player_2 thread
             event.set()
+    return
+
+
+def init(match_decisions, score_card):
+    """
+    Inits the match
+    :param match_decisions:
+    :param score_card:
+    :return:
+    """
+    event = threading.Event()
+    player_1_thread = threading.Thread(name=PLAYER_1, target=player_1, args=(event, match_decisions, score_card,))
+    player_2_thread = threading.Thread(name=PLAYER_2, target=player_2, args=(event, match_decisions, score_card,))
+    player_1_thread.start()
+    player_2_thread.start()
+    player_1_thread.join()
+    player_2_thread.join()
+    return
 
 
 def main():
@@ -172,13 +216,135 @@ def main():
     # Score card to keep score
     score_card = collections.Counter()
     match_decisions = {MATCH_END: False, TEN_TIE: False}
-    event = threading.Event()
-    player_1_thread = threading.Thread(name=PLAYER_1, target=player_1, args=(event, match_decisions, score_card,))
-    player_2_thread = threading.Thread(name=PLAYER_2, target=player_2, args=(event, match_decisions, score_card,))
-    player_1_thread.start()
-    player_2_thread.start()
-    player_1_thread.join()
-    player_2_thread.join()
+    try:
+        init(match_decisions=match_decisions, score_card=score_card)
+    except KeyboardInterrupt:
+        log.info("Interrupted. Exiting..")
+        sys.exit(0)
+
+
+##########################################################################
+# Tests using pytest
+##########################################################################
+
+def test_get_player_from_score():
+    """
+    Tests the function get_player_from_score
+    """
+    score_card = collections.Counter()
+    score = 15
+    score1 = 16
+    score_card[PLAYER_1] = score
+    score_card[PLAYER_2] = score1
+    assert get_player_from_score(score=score, score_card=score_card) == PLAYER_1
+    assert get_player_from_score(score=score1, score_card=score_card) == PLAYER_2
+
+
+def test_set():
+    """
+    Tests normal flow for a set
+    :return:
+    """
+    global set_winner
+    score_card = collections.Counter()
+    match_decisions = {MATCH_END: False, TEN_TIE: False}
+    try:
+        init(match_decisions=match_decisions, score_card=score_card)
+    except KeyboardInterrupt:
+        log.info("Interrupted. Exiting..")
+        sys.exit(0)
+
+    winner = set_winner
+    log.info("[TEST] Winner: " + winner)
+    winning_score = score_card[winner]
+    log.info("[TEST] Winning score: " + str(winning_score))
+    assert winning_score == max(score_card[PLAYER_1], score_card[PLAYER_2])
+
+    if match_decisions[TEN_TIE]:
+        assert winning_score != MIN_WINNING_SCORE
+        assert winning_score == 21 or abs(score_card[PLAYER_1] - score_card[PLAYER_2]) == 2
+    set_winner = ""
+    return
+
+
+def test_ten_tie():
+    """
+    Tests the scenario where scores are tied to ten.
+    Assets that player wins either by attaining score of 21 or a 2-point lead.
+    :return:
+    """
+    global set_winner
+    score_card = collections.Counter()
+    match_decisions = {MATCH_END: False, TEN_TIE: True}
+    score_card[PLAYER_1] = 10
+    score_card[PLAYER_2] = 10
+    try:
+        init(match_decisions=match_decisions, score_card=score_card)
+    except KeyboardInterrupt:
+        log.info("Interrupted. Exiting..")
+        sys.exit(0)
+    winner = set_winner
+    log.info("[TEST] Winner: " + winner)
+    winning_score = score_card[winner]
+    log.info("[TEST] Winning score: " + str(winning_score))
+    assert winning_score == max(score_card[PLAYER_1], score_card[PLAYER_2])
+    assert winning_score != MIN_WINNING_SCORE
+    assert winning_score == 21 or abs(score_card[PLAYER_1] - score_card[PLAYER_2]) == 2
+    set_winner = ""
+    return
+
+
+def test_ten_tie_with_score_greater_than_ten():
+    """
+    Tests a scenario where players have attained a ten-tie and their scores are both greater than 10.
+    :return:
+    """
+    global set_winner
+    score_card = collections.Counter()
+    match_decisions = {MATCH_END: False, TEN_TIE: True}
+    score_card[PLAYER_1] = 15
+    score_card[PLAYER_2] = 16
+    try:
+        init(match_decisions=match_decisions, score_card=score_card)
+    except KeyboardInterrupt:
+        log.info("Interrupted. Exiting..")
+        sys.exit(0)
+
+    winner = set_winner
+    log.info("[TEST] Winner: " + winner)
+    winning_score = score_card[winner]
+    log.info("[TEST] Winning score: " + str(winning_score))
+    assert winning_score == max(score_card[PLAYER_1], score_card[PLAYER_2])
+    assert winning_score != MIN_WINNING_SCORE
+    assert winning_score == 21 or abs(score_card[PLAYER_1] - score_card[PLAYER_2]) == 2
+    set_winner = ""
+    return
+
+
+def test_twenty_tie():
+    """
+    Tests a scenario where scores are tied to 20. Asserts that player has to win by attaining a score of 21.
+    :return:
+    """
+    global set_winner
+    score_card = collections.Counter()
+    match_decisions = {MATCH_END: False, TEN_TIE: True}
+    score_card[PLAYER_1] = 20
+    score_card[PLAYER_2] = 20
+    try:
+        init(match_decisions=match_decisions, score_card=score_card)
+    except KeyboardInterrupt:
+        log.info("Interrupted. Exiting..")
+        sys.exit(0)
+
+    winner = set_winner
+    log.info("[TEST] Winner: " + winner)
+    winning_score = score_card[winner]
+    log.info("[TEST] Winning score: " + str(winning_score))
+    assert winning_score == max(score_card[PLAYER_1], score_card[PLAYER_2])
+    assert winning_score == 21
+    set_winner = ""
+    return
 
 
 if __name__ == "__main__":
